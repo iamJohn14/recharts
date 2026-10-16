@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { describe, expect, it } from 'vitest';
-import { Legend, RadialBar, RadialBarChart, RechartsThemeProvider } from '../../../src';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent } from '@testing-library/react';
+import { Legend, RadialBar, RadialBarChart, RechartsThemeProvider, Tooltip } from '../../../src';
 import { rechartsTestRender } from '../../helper/createSelectorTestCase';
 import { assertNotNull } from '../../helper/assertNotNull';
 
@@ -214,5 +215,138 @@ describe('RadialBar theme', () => {
       expect(background).toHaveAttribute('stroke-opacity', '0.8');
       expect(background).toHaveAttribute('fill-opacity', '0.6');
     });
+  });
+});
+
+describe('RadialBar data entry styles (#7973)', () => {
+  function getTooltipItem(container: Element): HTMLElement {
+    const tooltipItem = container.querySelector<HTMLElement>('.recharts-tooltip-item');
+    assertNotNull(tooltipItem);
+    return tooltipItem;
+  }
+
+  it('shows the RadialBar fill in the tooltip when the entry only has a stroke', () => {
+    const { container } = rechartsTestRender(
+      <RadialBarChart width={400} height={400} data={[{ name: 'A', value: 40, stroke: 'lime' }]}>
+        <RadialBar dataKey="value" fill="#123456" isAnimationActive={false} />
+        <Tooltip defaultIndex={0} />
+      </RadialBarChart>,
+    );
+
+    const sector = getSector(container);
+    expect(sector).toHaveAttribute('fill', '#123456');
+    expect(sector).toHaveAttribute('stroke', 'lime');
+    expect(getTooltipItem(container)).toHaveStyle({ color: 'rgb(18, 52, 86)' });
+  });
+
+  it('shows the RadialBar fill in the tooltip when the entry only has a stroke, with a theme', () => {
+    const { container } = rechartsTestRender(
+      <RechartsThemeProvider value={{ graphicalItems: [{ fill: 'purple', stroke: 'indigo' }] }}>
+        <RadialBarChart width={400} height={400} data={[{ name: 'A', value: 40, stroke: 'lime' }]}>
+          <RadialBar dataKey="value" fill="#123456" isAnimationActive={false} />
+          <Tooltip defaultIndex={0} />
+        </RadialBarChart>
+      </RechartsThemeProvider>,
+    );
+
+    const sector = getSector(container);
+    expect(sector).toHaveAttribute('fill', '#123456');
+    expect(sector).toHaveAttribute('stroke', 'lime');
+    expect(getTooltipItem(container)).toHaveStyle({ color: 'rgb(18, 52, 86)' });
+  });
+
+  it('ignores the entry color key in the tooltip, because it does not paint the sector', () => {
+    const { container } = rechartsTestRender(
+      <RechartsThemeProvider value={{ graphicalItems: [{ fill: 'purple', stroke: 'indigo' }] }}>
+        <RadialBarChart width={400} height={400} data={[{ name: 'A', value: 40, color: 'blue' }]}>
+          <RadialBar dataKey="value" isAnimationActive={false} />
+          <Tooltip defaultIndex={0} />
+        </RadialBarChart>
+      </RechartsThemeProvider>,
+    );
+
+    expect(getSector(container)).toHaveAttribute('fill', 'purple');
+    expect(getTooltipItem(container)).toHaveStyle({ color: 'rgb(128, 0, 128)' });
+  });
+
+  it('uses the entry stroke for the legend and the tooltip when the sector has no fill', () => {
+    const strokedAndThemed = [
+      { name: 'Stroked', value: 40, stroke: 'lime' },
+      { name: 'Themed', value: 80 },
+    ];
+    const { container } = rechartsTestRender(
+      <RechartsThemeProvider value={{ graphicalItems: [{ fill: 'purple', stroke: 'indigo' }] }}>
+        <RadialBarChart width={400} height={400} data={strokedAndThemed}>
+          <RadialBar dataKey="value" isAnimationActive={false} />
+          <Legend />
+          <Tooltip defaultIndex={0} />
+        </RadialBarChart>
+      </RechartsThemeProvider>,
+    );
+
+    const sectors = container.querySelectorAll('.recharts-radial-bar-sector');
+    expect(sectors[0]).not.toHaveAttribute('fill');
+    expect(sectors[0]).toHaveAttribute('stroke', 'lime');
+    expect(sectors[1]).toHaveAttribute('fill', 'purple');
+
+    const legendIcons = container.querySelectorAll('.recharts-legend-icon');
+    expect(legendIcons[0]).toHaveAttribute('fill', 'lime');
+    expect(legendIcons[1]).toHaveAttribute('fill', 'purple');
+    expect(getTooltipItem(container)).toHaveStyle({ color: 'rgb(0, 255, 0)' });
+  });
+
+  it('does not render the entry id on the sector or its background', () => {
+    const dataWithIds = [
+      { name: 'A', value: 40, id: 'entry-a' },
+      { name: 'B', value: 80, id: 'entry-b' },
+    ];
+    const onClick = vi.fn();
+    const { container } = rechartsTestRender(
+      <RadialBarChart width={400} height={400} data={dataWithIds}>
+        <RadialBar dataKey="value" background isAnimationActive={false} onClick={onClick} />
+      </RadialBarChart>,
+    );
+
+    expect(container.querySelectorAll('.recharts-radial-bar-sector')).toHaveLength(2);
+    expect(container.querySelectorAll('[id="entry-a"], [id="entry-b"]')).toHaveLength(0);
+
+    const sector = getSector(container);
+    fireEvent.click(sector);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(onClick.mock.calls[0]?.[0].payload).toBe(dataWithIds[0]);
+  });
+
+  it('spreads entry styles on the sector, but not on its background', () => {
+    const styledEntries = [
+      {
+        name: 'A',
+        value: 40,
+        stroke: 'lime',
+        strokeWidth: 7,
+        opacity: 0.5,
+        style: { cursor: 'help' },
+        'data-test': 'entry-a',
+      },
+    ];
+    const { container } = rechartsTestRender(
+      <RadialBarChart width={400} height={400} data={styledEntries}>
+        <RadialBar dataKey="value" background isAnimationActive={false} />
+      </RadialBarChart>,
+    );
+
+    const sector = getSector(container);
+    expect(sector).toHaveAttribute('stroke', 'lime');
+    expect(sector).toHaveAttribute('stroke-width', '7');
+    expect(sector).toHaveAttribute('opacity', '0.5');
+    expect(sector).toHaveAttribute('data-test', 'entry-a');
+    expect(sector).toHaveStyle({ cursor: 'help' });
+
+    const background = getBackgroundSector(container);
+    expect(background).toHaveAttribute('fill', '#eee');
+    expect(background).not.toHaveAttribute('stroke');
+    expect(background).not.toHaveAttribute('stroke-width');
+    expect(background).not.toHaveAttribute('opacity');
+    expect(background).not.toHaveAttribute('data-test');
+    expect(background).not.toHaveAttribute('style');
   });
 });

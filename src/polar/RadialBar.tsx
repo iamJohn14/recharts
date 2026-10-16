@@ -65,7 +65,12 @@ import { AxisId } from '../state/cartesianAxisSlice';
 import { RegisterGraphicalItemId } from '../context/RegisterGraphicalItemId';
 import { RadialBarSettings } from '../state/types/RadialBarSettings';
 import { SetPolarGraphicalItem } from '../state/SetGraphicalItem';
-import { svgPropertiesNoEvents, svgPropertiesNoEventsFromUnknown } from '../util/svgPropertiesNoEvents';
+import {
+  isDataAttribute,
+  isSvgElementPropKey,
+  svgPropertiesNoEvents,
+  svgPropertiesNoEventsFromUnknown,
+} from '../util/svgPropertiesNoEvents';
 import { RequiresDefaultProps, resolveDefaultProps } from '../util/resolveDefaultProps';
 import { WithIdRequired } from '../util/useUniqueId';
 import { ZIndexable, ZIndexLayer } from '../zIndex/ZIndexLayer';
@@ -526,11 +531,57 @@ type ThemeInternalProps = {
 
 type InternalProps = WithIdRequired<PropsWithDefaults> & Pick<InternalRadialBarProps, 'sectors'> & ThemeInternalProps;
 
-function SetRadialBarPayloadLegend(props: RadialBarProps) {
+/**
+ * The color a sector renders with: its fill, or its stroke when it has no fill.
+ * Follows the order in `RadialBarSectors`: entry colors win over the RadialBar colors,
+ * and with a theme an entry that has its own colors ignores the theme colors.
+ * A fill of `none` does not count, same as Pie, so a stroked sector still has a color to report.
+ *
+ * @param entry data entry, or a sector that already includes that entry's props
+ * @param fill fill of the RadialBar, theme included
+ * @param stroke stroke of the RadialBar, theme included
+ * @param unthemedStyles explicit styles of the RadialBar, or undefined without a theme
+ */
+function getRadialBarEntryColor(
+  entry: unknown,
+  fill: unknown,
+  stroke: unknown,
+  unthemedStyles: UnthemedStyles | undefined,
+): string | undefined {
+  const seriesStyles = getEntryStyleOverrides(entry, unthemedStyles) ?? {
+    fill: typeof fill === 'string' ? fill : undefined,
+    stroke: typeof stroke === 'string' ? stroke : undefined,
+  };
+  const entryFill = entry != null && typeof entry === 'object' && 'fill' in entry ? entry.fill : undefined;
+  const entryStroke = entry != null && typeof entry === 'object' && 'stroke' in entry ? entry.stroke : undefined;
+  if (typeof entryFill === 'string' && entryFill !== 'none') {
+    return entryFill;
+  }
+  if (typeof seriesStyles.fill === 'string' && seriesStyles.fill !== 'none') {
+    return seriesStyles.fill;
+  }
+  if (typeof entryStroke === 'string') {
+    return entryStroke;
+  }
+  return typeof seriesStyles.stroke === 'string' ? seriesStyles.stroke : undefined;
+}
+
+/**
+ * The background is not the graphical item, so it does not take the SVG properties of the data entry
+ * (`stroke`, `opacity`, `style`, `data-*`, `id`, ...).
+ * Custom background shapes still receive the other keys of the entry, and the entry itself as `payload`.
+ */
+function omitEntrySvgProps(entry: object): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(entry).filter(([key]) => key === 'name' || (!isSvgElementPropKey(key) && !isDataAttribute(key))),
+  );
+}
+
+function SetRadialBarPayloadLegend(props: RadialBarProps & { unthemedStyles?: UnthemedStyles }) {
   const legendPayload = useAppSelector(state => selectRadialBarLegendPayload(state, props.legendType));
   const themedLegendPayload = legendPayload?.map(entry => ({
     ...entry,
-    color: entry.color ?? props.fill,
+    color: getRadialBarEntryColor(entry.payload, props.fill, props.stroke, props.unthemedStyles),
   }));
   return <SetPolarLegendPayload legendPayload={themedLegendPayload ?? []} />;
 }
@@ -547,12 +598,31 @@ const SetRadialBarTooltipEntrySettings = React.memo(
     tooltipType,
     formatter,
     id,
+    unthemedStyles,
   }: Pick<
     InternalProps,
-    'dataKey' | 'sectors' | 'stroke' | 'strokeWidth' | 'name' | 'hide' | 'fill' | 'tooltipType' | 'formatter' | 'id'
+    | 'dataKey'
+    | 'sectors'
+    | 'stroke'
+    | 'strokeWidth'
+    | 'name'
+    | 'hide'
+    | 'fill'
+    | 'tooltipType'
+    | 'formatter'
+    | 'id'
+    | 'unthemedStyles'
   >) => {
     const tooltipEntrySettings: TooltipPayloadConfiguration = {
-      dataDefinedOnItem: sectors,
+      /*
+       * `color` is what the tooltip reads first. Put the color the sector actually renders with
+       * there, so a datum `stroke` or `color` does not win over the rendered fill.
+       * Leave sectors that have no resolved color untouched: their tooltip payload stays identical.
+       */
+      dataDefinedOnItem: sectors.map(sector => {
+        const color = getRadialBarEntryColor(sector, fill, stroke, unthemedStyles);
+        return color == null ? sector : { ...sector, color };
+      }),
       getPosition: noop,
       settings: {
         graphicalItemId: id,
@@ -608,7 +678,7 @@ function RadialBarBackgroundSectors({
         // @ts-expect-error backgroundProps is contributing unknown props
         const props: React.ComponentProps<typeof RadialBarSector> = {
           cornerRadius: parseCornerRadius(cornerRadius),
-          ...rest,
+          ...omitEntrySvgProps(rest),
           ...backgroundThemeProps,
           ...background,
           ...backgroundProps,
@@ -707,6 +777,7 @@ function RadialBarImpl(props: WithIdRequired<PropsWithDefaults> & ThemeInternalP
         tooltipType={props.tooltipType}
         formatter={props.formatter}
         id={props.id}
+        unthemedStyles={props.unthemedStyles}
       />
       <RadialBarWithState {...props} sectors={sectors} />
     </>
@@ -870,9 +941,15 @@ export function computeRadialBarDataItems({
       }
     }
 
+    /*
+     * `id` from a data entry is never spread on rendered elements to avoid duplicate DOM ids.
+     * The raw entry, id included, stays available through `payload`.
+     */
+    const entryWithoutId: Record<string, unknown> = typeof entry === 'object' && entry !== null ? { ...entry } : {};
+    delete entryWithoutId.id;
+
     return {
-      // @ts-expect-error can't spread unknown
-      ...entry,
+      ...entryWithoutId,
       ...backgroundSector,
       payload: entry,
       value: stackedData ? value : value[1],
@@ -944,7 +1021,7 @@ export function RadialBar<DataPointType = any, DataValueType = any>(
             minPointSize={props.minPointSize}
             maxBarSize={props.maxBarSize}
           />
-          <SetRadialBarPayloadLegend {...props} {...themedProps} />
+          <SetRadialBarPayloadLegend {...props} {...themedProps} unthemedStyles={unthemedStyles} />
           <RadialBarImpl
             {...props}
             {...themedProps}
